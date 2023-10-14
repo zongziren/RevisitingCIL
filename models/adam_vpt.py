@@ -7,12 +7,50 @@ from tqdm import tqdm
 from torch import optim
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
+from torchvision.ops.focal_loss import sigmoid_focal_loss
 from utils.inc_net import IncrementalNet,SimpleCosineIncrementalNet,MultiBranchCosineIncrementalNet,SimpleVitNet
 from models.base import BaseLearner
 from utils.toolkit import target2onehot, tensor2numpy
+from typing import Optional
 
 # tune the model at first session with vpt, and then conduct simple shot.
 num_workers = 8
+
+
+class FocalLoss(nn.Module):
+    def __init__(self, gamma: float, alpha: Optional[torch.Tensor] = None):
+        super(FocalLoss, self).__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        return focal_loss(input, target, self.gamma, self.alpha)
+
+
+def focal_loss(pred_logit: torch.Tensor,
+               label: torch.Tensor,
+               gamma: float,
+               alpha: Optional[torch.Tensor] = None) -> torch.Tensor:
+    B, C = pred_logit.shape[:2]
+    if pred_logit.dim() > 2:
+        pred_logit = pred_logit.reshape(B, C, -1)
+        pred_logit = pred_logit.transpose(1, 2)
+        pred_logit = pred_logit.reshape(-1, C)
+    label = label.reshape(-1)
+
+    log_p = torch.log_softmax(pred_logit, dim=-1)
+    log_p = log_p.gather(1, label[:, None]).squeeze()
+    p = torch.exp(log_p)
+
+    if alpha is None:
+        alpha = torch.ones((C,), dtype=torch.float, device=pred_logit.device)
+
+    alpha = alpha.to(label.device)
+    alpha = alpha.gather(0, label)
+
+    loss = -1 * alpha * torch.pow(1 - p, gamma) * log_p
+    return loss.sum() / alpha.sum()
+
 
 class Learner(BaseLearner):
     def __init__(self, args):
@@ -140,7 +178,12 @@ class Learner(BaseLearner):
                 inputs, targets = inputs.to(self._device), targets.to(self._device)
                 logits = self._network(inputs)["logits"]
 
-                loss = F.cross_entropy(logits, targets.long())
+                # loss = F.cross_entropy(logits, targets.long())
+                # loss = sigmoid_focal_loss(logits, targets.long(),reduction="mean")
+                num_class = logits.shape[1] # number of classes
+                alpha = np.abs(np.random.randn(num_class))
+                alpha = torch.tensor(alpha, dtype=torch.float)
+                loss = FocalLoss(gamma=0.2, alpha=alpha)(logits, targets.long())
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
