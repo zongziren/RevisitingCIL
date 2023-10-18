@@ -2,7 +2,6 @@ import numpy as np
 from torchvision import datasets, transforms
 from utils.toolkit import split_images_labels
 
-
 class iData(object):
     train_trsf = []
     test_trsf = []
@@ -70,9 +69,9 @@ def build_transform(is_train, args):
     input_size = 224
     resize_im = input_size > 32
     if is_train:
-        scale = (0.05, 1.0)
+        #scale = (0.05, 1.0)
+        scale = (0.08, 1.0)
         ratio = (3. / 4., 4. / 3.)
-        
         transform = [
             transforms.RandomResizedCrop(input_size, scale=scale, ratio=ratio),
             transforms.RandomHorizontalFlip(p=0.5),

@@ -178,12 +178,11 @@ class Learner(BaseLearner):
                 inputs, targets = inputs.to(self._device), targets.to(self._device)
                 logits = self._network(inputs)["logits"]
 
-                # loss = F.cross_entropy(logits, targets.long())
-                # loss = sigmoid_focal_loss(logits, targets.long(),reduction="mean")
-                num_class = logits.shape[1] # number of classes
-                alpha = np.abs(np.random.randn(num_class))
-                alpha = torch.tensor(alpha, dtype=torch.float)
-                loss = FocalLoss(gamma=0.2, alpha=alpha)(logits, targets.long())
+                loss = F.cross_entropy(logits, targets.long())
+                # num_class = logits.shape[1] # number of classes
+                # alpha = np.abs(np.random.randn(num_class))
+                # alpha = torch.tensor(alpha, dtype=torch.float)
+                # loss = FocalLoss(gamma=2, alpha=alpha)(logits, targets.long())
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
