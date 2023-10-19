@@ -12,44 +12,74 @@ from utils.inc_net import IncrementalNet,SimpleCosineIncrementalNet,MultiBranchC
 from models.base import BaseLearner
 from utils.toolkit import target2onehot, tensor2numpy
 from typing import Optional
+from torch.autograd import Variable
 
 # tune the model at first session with vpt, and then conduct simple shot.
 num_workers = 8
 
-
-class FocalLoss(nn.Module):
-    def __init__(self, gamma: float, alpha: Optional[torch.Tensor] = None):
-        super(FocalLoss, self).__init__()
-        self.gamma = gamma
+class MultiFocalLoss(nn.Module):
+    def __init__(self, num_class, alpha=None, gamma=2, balance_index=-1, smooth=None, size_average=True):
+        super(MultiFocalLoss, self).__init__()
+        self.num_class = num_class
         self.alpha = alpha
+        self.gamma = gamma
+        self.smooth = smooth
+        self.size_average = size_average
 
-    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        return focal_loss(input, target, self.gamma, self.alpha)
+        if self.alpha is None:
+            self.alpha = torch.ones(self.num_class, 1)
+        elif isinstance(self.alpha, (list, np.ndarray)):
+            assert len(self.alpha) == self.num_class
+            self.alpha = torch.FloatTensor(alpha).view(self.num_class, 1)
+            self.alpha = self.alpha / self.alpha.sum()
+        elif isinstance(self.alpha, float):
+            alpha = torch.ones(self.num_class, 1)
+            alpha = alpha * (1 - self.alpha)
+            alpha[balance_index] = self.alpha
+            self.alpha = alpha
+        else:
+            raise TypeError('Not support alpha type')
 
+        if self.smooth is not None:
+            if self.smooth < 0 or self.smooth > 1.0:
+                raise ValueError('smooth value should be in [0,1]')
 
-def focal_loss(pred_logit: torch.Tensor,
-               label: torch.Tensor,
-               gamma: float,
-               alpha: Optional[torch.Tensor] = None) -> torch.Tensor:
-    B, C = pred_logit.shape[:2]
-    if pred_logit.dim() > 2:
-        pred_logit = pred_logit.reshape(B, C, -1)
-        pred_logit = pred_logit.transpose(1, 2)
-        pred_logit = pred_logit.reshape(-1, C)
-    label = label.reshape(-1)
+    def forward(self, input, target):
+        logit = F.softmax(input, dim=1)
 
-    log_p = torch.log_softmax(pred_logit, dim=-1)
-    log_p = log_p.gather(1, label[:, None]).squeeze()
-    p = torch.exp(log_p)
+        if logit.dim() > 2:
+            # N,C,d1,d2 -> N,C,m (m=d1*d2*...)
+            logit = logit.view(logit.size(0), logit.size(1), -1)
+            logit = logit.permute(0, 2, 1).contiguous()
+            logit = logit.view(-1, logit.size(-1))
+        target = target.view(-1, 1)
+        epsilon = 1e-10
+        alpha = self.alpha
+        if alpha.device != input.device:
+            alpha = alpha.to(input.device)
 
-    if alpha is None:
-        alpha = torch.ones((C,), dtype=torch.float, device=pred_logit.device)
+        idx = target.cpu().long()
+        one_hot_key = torch.FloatTensor(target.size(0), self.num_class).zero_()
+        one_hot_key = one_hot_key.scatter_(1, idx, 1)
+        if one_hot_key.device != logit.device:
+            one_hot_key = one_hot_key.to(logit.device)
 
-    alpha = alpha.to(label.device)
-    alpha = alpha.gather(0, label)
+        if self.smooth:
+            one_hot_key = torch.clamp(
+                one_hot_key, self.smooth, 1.0 - self.smooth)
+        pt = (one_hot_key * logit).sum(1) + epsilon
+        logpt = pt.log()
 
-    loss = -1 * alpha * torch.pow(1 - p, gamma) * log_p
-    return loss.sum() / alpha.sum()
+        gamma = self.gamma
+
+        alpha = alpha[idx]
+        loss = -1 * alpha * torch.pow((1 - pt), gamma) * logpt
+
+        if self.size_average:
+            loss = loss.mean()
+        else:
+            loss = loss.sum()
+        return loss
 
 
 class Learner(BaseLearner):
@@ -177,12 +207,14 @@ class Learner(BaseLearner):
             for i, (_, inputs, targets) in enumerate(train_loader):
                 inputs, targets = inputs.to(self._device), targets.to(self._device)
                 logits = self._network(inputs)["logits"]
+                #loss = F.cross_entropy(logits, targets.long())
 
-                loss = F.cross_entropy(logits, targets.long())
-                # num_class = logits.shape[1] # number of classes
-                # alpha = np.abs(np.random.randn(num_class))
-                # alpha = torch.tensor(alpha, dtype=torch.float)
-                # loss = FocalLoss(gamma=2, alpha=alpha)(logits, targets.long())
+
+                num_class = logits.shape[1] # number of classes 
+                focal_loss=MultiFocalLoss(gamma=0.15,num_class=num_class)
+                loss = focal_loss.forward(input=logits, target=targets)
+
+
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
